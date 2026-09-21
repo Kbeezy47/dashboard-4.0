@@ -1,0 +1,46 @@
+// --- Vite / Static Handling ---
+async function setupViteOrStatic() {
+  let vite; // Hoist the variable so we can access it during shutdown
+
+  if (process.env.NODE_ENV !== 'production') {
+    vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.use((_req: Request, res: Response) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  // 1. Assign the Express server to a variable
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Hardware Monitor running on http://0.0.0.0:${PORT}`);
+  });
+
+  // 2. Create the shutdown sequence
+  const shutdown = async () => {
+    console.log('\nClosing server and releasing port...');
+    
+    // Shut down Vite's internal WebSocket and file watchers first
+    if (vite) {
+      await vite.close();
+    }
+
+    // Shut down the Express server
+    server.close(() => {
+      console.log('Port released. Exiting.');
+      process.exit(0);
+    });
+    
+    // Failsafe: force exit if closing takes longer than 5 seconds
+    setTimeout(() => process.exit(1), 5000);
+  };
+
+  // 3. Listen for termination signals
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}

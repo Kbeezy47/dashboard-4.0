@@ -1,0 +1,6 @@
+{
+  "name": "Mining Rig Dashboard",
+  "description": "Real-time system hardware telemetry dashboard displaying GPU and CPU temperatures, loads, fan speeds, and memory metrics inspired by Rainmeter neon meters.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
