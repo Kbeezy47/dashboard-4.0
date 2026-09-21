@@ -50,3 +50,15 @@ export interface DashboardData {
   metrics: SystemMetrics;
   history: MetricHistoryPoint[];
 }
+
+// Mining Stats from KryptexMonitoringBot
+export interface MiningStats {
+  workerStatus: string;
+  currentHashrate: string;
+  avgHashrate3H: string;
+  totalHashrate30m: string;
+  balance: string;
+  pending: string;
+  profit24h: string;
+  lastUpdated: string;
+}

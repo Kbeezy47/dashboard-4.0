@@ -4,6 +4,9 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createServer as createViteServer } from 'vite';
 import si from 'systeminformation';
+import { initTelegram, client } from "./services/telegramClient";
+import { NewMessage } from "telegram/events";
+import { MiningStats } from './types';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -13,6 +16,56 @@ app.use(express.json());
 
 const VSB_KEY = 'HKCU\\Software\\HWiNFO64\\VSB';
 const GPU_FAN_MAX_RPM = 3200;
+
+// Telegram mining bot configuration
+const BOT_USERNAME = "KryptexMonitoringBot";
+
+// Structured state holding parsed mining values
+const miningData: MiningStats = {
+  workerStatus: "offline",
+  currentHashrate: "0 TH/s",
+  avgHashrate3H: "0 TH/s",
+  totalHashrate30m: "0 TH/s",
+  balance: "0",
+  pending: "0",
+  profit24h: "0",
+  lastUpdated: "Never",
+};
+
+// Regex parsers for bot outputs
+function parseBotMessage(text: string) {
+  // 1. Parse Workers response
+  if (text.includes("Average hashrate") || text.includes("Total hashrate")) {
+    // Matches line: "<WorkerName>: <status>, <hashrate>." (e.g., "SSD1: active, 113.91 TH/s.")
+    const workerMatch = text.match(/:\s*([a-zA-Z]+),\s*([\d\.]+\s*[A-Za-z\/]+)/);
+    if (workerMatch) {
+      miningData.workerStatus = workerMatch[1].trim();
+      miningData.currentHashrate = workerMatch[2].trim();
+    }
+
+    const avgMatch = text.match(/Average hashrate\s*\([^\)]+\):\s*([\d\.]+\s*[A-Za-z\/]+)/i);
+    if (avgMatch) miningData.avgHashrate3H = avgMatch[1].trim();
+
+    const totalMatch = text.match(/Total hashrate\s*\([^\)]+\):\s*([\d\.]+\s*[A-Za-z\/]+)/i);
+    if (totalMatch) miningData.totalHashrate30m = totalMatch[1].trim();
+
+    miningData.lastUpdated = new Date().toLocaleTimeString();
+  }
+
+  // 2. Parse Wallets response
+  if (text.includes("Balance:") && text.includes("Left for payment:")) {
+    const balanceMatch = text.match(/Balance:\s*([^\n\r]+)/i);
+    if (balanceMatch) miningData.balance = balanceMatch[1].replace(/\.$/, "").trim();
+
+    const pendingMatch = text.match(/Left for payment:\s*([^\n\r]+)/i);
+    if (pendingMatch) miningData.pending = pendingMatch[1].replace(/\.$/, "").trim();
+
+    const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
+    if (profitMatch) miningData.profit24h = profitMatch[1].trim() + " PRL";
+
+    miningData.lastUpdated = new Date().toLocaleTimeString();
+  }
+}
 
 interface HistoryPoint {
   timestamp: number;
@@ -36,6 +89,36 @@ const historyBuffer: HistoryPoint[] = [];
 const MAX_HISTORY = 30;
 
 let cachedSensors: Map<string, HwinfoSensor> | null = null;
+
+async function startServer() {
+  // Initialize your existing Express/Bun server logic here...
+  
+  // Initialize Telegram User Client
+  await initTelegram();
+
+  // Event listener for incoming replies from KryptexMonitoringBot
+  client.addEventHandler((event: any) => {
+    const rawText = event.message?.message;
+    if (rawText) {
+      parseBotMessage(rawText);
+    }
+  }, new NewMessage({ chats: [BOT_USERNAME] }));
+
+  // Polling loop: Alternates commands every 10 seconds
+  let step = 0;
+  setInterval(async () => {
+    try {
+      if (step % 2 === 0) {
+        await client.sendMessage(BOT_USERNAME, { message: "🔨 Workers" });
+      } else {
+        await client.sendMessage(BOT_USERNAME, { message: "💰 Wallets" });
+      }
+      step++;
+    } catch (err) {
+      console.error("Failed to send command to Telegram bot:", err);
+    }
+  }, 10000);
+}
 
 function formatUptime(seconds: number): string {
   const totalSeconds = Math.floor(seconds);
@@ -217,6 +300,11 @@ app.get('/api/stats', async (_req: Request, res: Response) => {
   }
 });
 
+// Mining stats from KryptexMonitoringBot
+app.get('/api/miner', (_req: Request, res: Response) => {
+  res.json(miningData);
+});
+
 // 1. Ensure ViteDevServer is imported at the top of your file
 import { ViteDevServer } from 'vite'; 
 // (assuming your createViteServer import is already there)
@@ -265,4 +353,5 @@ async function setupViteOrStatic() {
   process.on('SIGTERM', shutdown);
 }
 
+startServer();
 setupViteOrStatic();

@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { DashboardData } from './types';
-import { fetchDashboardData } from './services/api';
+import { DashboardData, MiningStats } from './types';
+import { fetchDashboardData, fetchMinerData } from './services/api';
 import Header from './components/Header';
 import SystemInfoPanel from './components/SystemInfoPanel';
+import MiningStatsPanel from './components/MiningStatsPanel';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 
 const App: React.FC = () => {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
+  const [miningData, setMiningData] = useState<MiningStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -32,12 +34,26 @@ const App: React.FC = () => {
       }
     };
 
+    const fetchMining = async () => {
+      try {
+        const data = await fetchMinerData();
+        if (isMounted) {
+          setMiningData(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch mining stats:', err);
+      }
+    };
+
     fetchData(); // Initial fetch
+    fetchMining(); // Initial mining fetch
     const intervalId = setInterval(fetchData, 1000); // Poll every 1s per Rainmeter Update=1000
+    const miningIntervalId = setInterval(fetchMining, 5000); // Poll mining stats every 5s
 
     return () => {
       isMounted = false;
       clearInterval(intervalId);
+      clearInterval(miningIntervalId);
     };
   }, []);
 
@@ -70,7 +86,10 @@ const App: React.FC = () => {
             </button>
           </div>
         ) : dashboardData ? (
-          <SystemInfoPanel data={dashboardData} />
+          <div className="space-y-8">
+            <SystemInfoPanel data={dashboardData} />
+            <MiningStatsPanel data={miningData} />
+          </div>
         ) : null}
       </main>
     </div>
