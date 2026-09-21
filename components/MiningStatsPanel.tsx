@@ -7,7 +7,6 @@ import {
   TrendingUp,
   Gauge,
   Wallet,
-  Hourglass,
   Coins,
   Clock,
 } from 'lucide-react';
@@ -122,16 +121,6 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
             subValue="Confirmed"
             valueClassName="text-purple-400"
             accentColor="purple"
-          />
-
-          {/* Pending */}
-          <StatCard
-            icon={<Hourglass className="w-5 h-5 text-orange-400" />}
-            title="Pending"
-            value={data?.pending || '--'}
-            subValue="Left for payment"
-            valueClassName="text-orange-400"
-            accentColor="orange"
           />
         </div>
       </div>

@@ -58,7 +58,6 @@ export interface MiningStats {
   avgHashrate3H: string;
   totalHashrate30m: string;
   balance: string;
-  pending: string;
   profit24h: string;
   lastUpdated: string;
 }

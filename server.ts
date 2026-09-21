@@ -27,7 +27,6 @@ const miningData: MiningStats = {
   avgHashrate3H: "0 TH/s",
   totalHashrate30m: "0 TH/s",
   balance: "0",
-  pending: "0",
   profit24h: "0",
   lastUpdated: "Never",
 };
@@ -56,9 +55,6 @@ function parseBotMessage(text: string) {
   if (text.includes("Balance:") && text.includes("Left for payment:")) {
     const balanceMatch = text.match(/Balance:\s*([^\n\r]+)/i);
     if (balanceMatch) miningData.balance = balanceMatch[1].replace(/\.$/, "").trim();
-
-    const pendingMatch = text.match(/Left for payment:\s*([^\n\r]+)/i);
-    if (pendingMatch) miningData.pending = pendingMatch[1].replace(/\.$/, "").trim();
 
     const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
     if (profitMatch) miningData.profit24h = profitMatch[1].trim() + " PRL";
