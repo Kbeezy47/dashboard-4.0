@@ -9,6 +9,8 @@ import {
   Wallet,
   Coins,
   Clock,
+  ShieldCheck,
+  Hourglass,
 } from 'lucide-react';
 
 interface MiningStatsPanelProps {
@@ -34,6 +36,17 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
   const avg = splitValueUnit(data?.avgHashrate3H || '0 TH/s');
   const total = splitValueUnit(data?.totalHashrate30m || '0 TH/s');
   const profit = splitValueUnit(data?.profit24h || '0 PRL');
+
+  const currency = data?.balanceCurrency || 'PRL';
+
+  // The bot reports the unconfirmed share of the balance as a percentage
+  // on the "Left for payment" line. Confirmed is simply the remainder.
+  const unconfirmedPercent = Number.isFinite(data?.unconfirmedPercent)
+    ? Math.min(100, Math.max(0, data?.unconfirmedPercent ?? 0))
+    : null;
+  const confirmedPercent = unconfirmedPercent !== null ? 100 - unconfirmedPercent : null;
+
+  const hasSplit = unconfirmedPercent !== null && data?.balanceConfirmed !== undefined;
 
   return (
     <div className="space-y-6">
@@ -112,17 +125,83 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
             valueClassName="text-amber-400"
             accentColor="orange"
           />
+        </div>
+      </div>
 
-          {/* Balance */}
+      {/* Wallet Balance Breakdown */}
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg sm:text-xl font-bold text-white tracking-wide flex items-center gap-2">
+            <Wallet className="w-5 h-5 text-purple-400" />
+            Wallet Balance
+          </h2>
+          <span className="text-xs text-neutral-400 font-mono">
+            {data?.payoutThreshold && data.payoutThreshold !== '0'
+              ? `Payout at ${data.payoutThreshold} ${currency}`
+              : currency}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {/* Total Balance */}
           <StatCard
             icon={<Wallet className="w-5 h-5 text-purple-400" />}
-            title="Balance"
+            title="Total Balance"
             value={data?.balance || '--'}
-            subValue="Confirmed"
+            unit={currency}
+            subValue={data?.balanceUsd ? `$${data.balanceUsd} USD` : undefined}
             valueClassName="text-purple-400"
             accentColor="purple"
           />
+
+          {/* Confirmed Balance */}
+          <StatCard
+            icon={<ShieldCheck className="w-5 h-5 text-green-400" />}
+            title="Confirmed"
+            value={data?.balanceConfirmed || '--'}
+            unit={currency}
+            subValue={confirmedPercent !== null ? `${confirmedPercent}%` : undefined}
+            valueClassName="text-green-400"
+            accentColor="green"
+            progress={confirmedPercent ?? undefined}
+          />
+
+          {/* Unconfirmed Balance */}
+          <StatCard
+            icon={<Hourglass className="w-5 h-5 text-orange-400" />}
+            title="Unconfirmed"
+            value={data?.balanceUnconfirmed || '--'}
+            unit={currency}
+            subValue={unconfirmedPercent !== null ? `${unconfirmedPercent}%` : undefined}
+            valueClassName="text-orange-400"
+            accentColor="orange"
+            progress={unconfirmedPercent ?? undefined}
+          />
         </div>
+
+        {/* Confirmed / Unconfirmed split bar */}
+        {hasSplit && (
+          <div className="mt-4 bg-neutral-900/60 border border-neutral-800 rounded-xl p-4">
+            <div className="flex items-center justify-between text-xs font-mono mb-2">
+              <span className="text-green-400">
+                Confirmed {confirmedPercent}% • {data?.balanceConfirmed} {currency}
+              </span>
+              <span className="text-orange-400">
+                Unconfirmed {unconfirmedPercent}% • {data?.balanceUnconfirmed} {currency}
+              </span>
+            </div>
+            <div className="w-full h-2.5 rounded-full overflow-hidden bg-neutral-800 flex">
+              <div
+                className="h-full bg-green-500 transition-all duration-300"
+                style={{ width: `${confirmedPercent}%` }}
+              />
+              <div
+                className="h-full bg-orange-500 transition-all duration-300"
+                style={{ width: `${unconfirmedPercent}%` }}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

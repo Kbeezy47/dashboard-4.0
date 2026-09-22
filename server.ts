@@ -27,9 +27,45 @@ const miningData: MiningStats = {
   avgHashrate3H: "0 TH/s",
   totalHashrate30m: "0 TH/s",
   balance: "0",
+  balanceCurrency: "PRL",
+  balanceUsd: "0",
+  balanceConfirmed: "0",
+  balanceUnconfirmed: "0",
+  unconfirmedPercent: 0,
+  payoutThreshold: "0",
   profit24h: "0",
   lastUpdated: "Never",
 };
+
+// Formats a crypto amount: up to 8 decimals, trailing zeros trimmed.
+function formatCryptoAmount(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  const trimmed = value
+    .toFixed(8)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+  return trimmed === "" || trimmed === "-0" ? "0" : trimmed;
+}
+
+// Splits the total balance into confirmed / unconfirmed using the
+// percentage reported on the "Left for payment" line (that % is the
+// unconfirmed share of the balance).
+function applyBalanceSplit() {
+  const total = parseFloat(miningData.balance);
+  const percent = miningData.unconfirmedPercent;
+
+  if (!Number.isFinite(total)) {
+    miningData.balanceConfirmed = "0";
+    miningData.balanceUnconfirmed = "0";
+    return;
+  }
+
+  const safePercent = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
+  const unconfirmed = total * (safePercent / 100);
+
+  miningData.balanceUnconfirmed = formatCryptoAmount(unconfirmed);
+  miningData.balanceConfirmed = formatCryptoAmount(total - unconfirmed);
+}
 
 // Regex parsers for bot outputs
 function parseBotMessage(text: string) {
@@ -52,12 +88,43 @@ function parseBotMessage(text: string) {
   }
 
   // 2. Parse Wallets response
-  if (text.includes("Balance:") && text.includes("Left for payment:")) {
-    const balanceMatch = text.match(/Balance:\s*([^\n\r]+)/i);
-    if (balanceMatch) miningData.balance = balanceMatch[1].replace(/\.$/, "").trim();
+  const hasBalanceLine = text.includes("Balance:");
+  const hasPayoutLine = text.includes("Left for payment:") || text.includes("Pending:");
+
+  if (hasBalanceLine && hasPayoutLine) {
+    // "Balance: 0.938014 PRL (0.91 USD)."
+    const balanceMatch = text.match(
+      /Balance:\s*([\d.,]+)\s*([A-Za-z]+)\s*\(\s*([\d.,]+)\s*USD\s*\)/i
+    );
+    if (balanceMatch) {
+      miningData.balance = balanceMatch[1].replace(/,/g, "").trim();
+      miningData.balanceCurrency = balanceMatch[2].trim();
+      miningData.balanceUsd = balanceMatch[3].replace(/,/g, "").trim();
+    } else {
+      // Fallback for a balance line without the USD portion.
+      const looseMatch = text.match(/Balance:\s*([\d.,]+)\s*([A-Za-z]+)?/i);
+      if (looseMatch) {
+        miningData.balance = looseMatch[1].replace(/,/g, "").trim();
+        if (looseMatch[2]) miningData.balanceCurrency = looseMatch[2].trim();
+      }
+    }
+
+    // "Left for payment: 0.938014 / 1.0 PRL (74%)."
+    // The percentage here is the unconfirmed share of the balance.
+    const leftMatch = text.match(
+      /(?:Left for payment|Pending)[^:]*:\s*([\d.,]+)\s*\/\s*([\d.,]+)\s*([A-Za-z]+)\s*\(\s*([\d.,]+)\s*%\s*\)/i
+    );
+    if (leftMatch) {
+      miningData.payoutThreshold = leftMatch[2].replace(/,/g, "").trim();
+      if (!miningData.balanceCurrency) miningData.balanceCurrency = leftMatch[3].trim();
+      const parsedPercent = parseFloat(leftMatch[4].replace(/,/g, ""));
+      miningData.unconfirmedPercent = Number.isFinite(parsedPercent) ? parsedPercent : 0;
+    }
 
     const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
     if (profitMatch) miningData.profit24h = profitMatch[1].trim() + " PRL";
+
+    applyBalanceSplit();
 
     miningData.lastUpdated = new Date().toLocaleTimeString();
   }

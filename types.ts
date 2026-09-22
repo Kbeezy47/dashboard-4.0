@@ -57,7 +57,16 @@ export interface MiningStats {
   currentHashrate: string;
   avgHashrate3H: string;
   totalHashrate30m: string;
-  balance: string;
+
+  // Wallet balance breakdown
+  balance: string;              // Total balance, e.g. "0.938014"
+  balanceCurrency: string;      // Ticker, e.g. "PRL"
+  balanceUsd: string;           // Fiat value, e.g. "0.91"
+  balanceConfirmed: string;     // Confirmed portion, e.g. "0.24388364"
+  balanceUnconfirmed: string;   // Unconfirmed portion, e.g. "0.69413036"
+  unconfirmedPercent: number;   // % of the balance that is unconfirmed, e.g. 74
+  payoutThreshold: string;      // Payout threshold, e.g. "1.0"
+
   profit24h: string;
   lastUpdated: string;
 }
