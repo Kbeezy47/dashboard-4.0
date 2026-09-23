@@ -37,9 +37,14 @@ const miningData: MiningStats = {
   lastUpdated: "Never",
 };
 
-// Formats a crypto amount: up to 8 decimals, trailing zeros trimmed.
-function formatCryptoAmount(value: number): string {
+// Formats a crypto amount, optionally locking to a specific decimal count
+function formatCryptoAmount(value: number, fixedDecimals?: number): string {
   if (!Number.isFinite(value)) return "0";
+  
+  if (fixedDecimals !== undefined) {
+    return value.toFixed(fixedDecimals);
+  }
+
   const trimmed = value
     .toFixed(8)
     .replace(/(\.\d*?)0+$/, "$1")
@@ -48,23 +53,30 @@ function formatCryptoAmount(value: number): string {
 }
 
 // Splits the total balance into confirmed / unconfirmed using the
-// percentage reported on the "Left for payment" line (that % is the
-// unconfirmed share of the balance).
+// "Left for payment" percentage, which represents the remaining distance 
+// to the payout threshold from the confirmed balance.
 function applyBalanceSplit() {
   const total = parseFloat(miningData.balance);
-  const percent = miningData.unconfirmedPercent;
+  const threshold = parseFloat(miningData.payoutThreshold);
+  const leftPercent = miningData.unconfirmedPercent;
 
-  if (!Number.isFinite(total)) {
+  if (!Number.isFinite(total) || !Number.isFinite(threshold)) {
     miningData.balanceConfirmed = "0";
     miningData.balanceUnconfirmed = "0";
     return;
   }
 
-  const safePercent = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
-  const unconfirmed = total * (safePercent / 100);
+  const safeLeftPercent = Number.isFinite(leftPercent) ? Math.min(100, Math.max(0, leftPercent)) : 0;
+  
+  // Confirmed = Threshold * (100% - Left%)
+  const confirmed = threshold * (1 - (safeLeftPercent / 100));
+  
+  // Pending = Total - Confirmed
+  const unconfirmed = Math.max(0, total - confirmed);
 
-  miningData.balanceUnconfirmed = formatCryptoAmount(unconfirmed);
-  miningData.balanceConfirmed = formatCryptoAmount(total - unconfirmed);
+  // Lock both values to exactly 2 decimal places for UI uniformity
+  miningData.balanceUnconfirmed = formatCryptoAmount(unconfirmed, 2);
+  miningData.balanceConfirmed = formatCryptoAmount(confirmed, 2);
 }
 
 // Regex parsers for bot outputs
@@ -109,8 +121,8 @@ function parseBotMessage(text: string) {
       }
     }
 
-    // "Left for payment: 0.938014 / 1.0 PRL (74%)."
-    // The percentage here is the unconfirmed share of the balance.
+    // "Left for payment: 1.475789 / 1.0 PRL (28%)."
+    // The percentage here is the remaining amount needed to reach the threshold.
     const leftMatch = text.match(
       /(?:Left for payment|Pending)[^:]*:\s*([\d.,]+)\s*\/\s*([\d.,]+)\s*([A-Za-z]+)\s*\(\s*([\d.,]+)\s*%\s*\)/i
     );
@@ -193,7 +205,7 @@ function formatUptime(seconds: number): string {
 
 function parseHardwareName(sensor: string): string {
   // "CPU [#0]: AMD Ryzen 7 5700X3D: Enhanced" → "AMD Ryzen 7 5700X3D"
-  // "dGPU [#0]: NVIDIA GeForce RTX 3060 Ti: GIGABYTE..." → "NVIDIA GeForce RTX 3060 Ti"
+  // "dGPU [#0]: NVIDIA GeForce RTX 5060 Ti: GIGABYTE..." → "NVIDIA GeForce RTX 5060 Ti"
   const afterPrefix = sensor.replace(/^(?:CPU|dGPU)\s*\[#\d+\]:\s*/i, '');
   const parts = afterPrefix.split(':');
   return (parts[0] || afterPrefix).trim();
