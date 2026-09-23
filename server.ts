@@ -7,10 +7,45 @@ import si from 'systeminformation';
 import { initTelegram, client } from "./services/telegramClient";
 import { NewMessage } from "telegram/events";
 import { MiningStats, WalletBalance } from './types';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
 const app = express();
 const PORT = 3000;
+
+// --- Security: Validate required environment variables ---
+// API_ID and API_HASH are required. TELEGRAM_SESSION is optional so the
+// first-run interactive login (which prints the session string) still works.
+const requiredEnv = ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH'];
+for (const key of requiredEnv) {
+  if (!process.env[key]) {
+    console.error(`Missing required environment variable: ${key}`);
+    process.exit(1);
+  }
+}
+if (!process.env.TELEGRAM_SESSION) {
+  console.warn('Warning: TELEGRAM_SESSION is not set. Telegram will prompt for interactive login.');
+}
+
+// --- Security: Trust proxy (Caddy) for correct client IPs ---
+app.set('trust proxy', true);
+
+// --- Security: HTTP security headers ---
+app.use(helmet({
+  contentSecurityPolicy: false, // Vite dev server needs this disabled
+  hsts: { maxAge: 31536000, includeSubDomains: true },
+}));
+
+// --- Security: Rate limiting on API routes ---
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', apiLimiter);
 
 app.use(express.json());
 
@@ -498,8 +533,8 @@ async function setupViteOrStatic() {
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Hardware Monitor running on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Hardware Monitor running on http://127.0.0.1:${PORT} (localhost only - Caddy handles external access)`);
   });
 
   const shutdown = async () => {

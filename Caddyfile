@@ -1,0 +1,27 @@
+# Caddyfile for the Mining Rig Dashboard
+#
+# SETUP:
+# 1. Install Tailscale on this machine and sign in.
+# 2. Run `tailscale status` (or check the Tailscale admin panel) to find your
+#    MagicDNS name. It looks like:  <device-name>.<tailnet>.ts.net
+# 3. Replace YOUR-DEVICE-NAME.tailnet.ts.net below with that name.
+# 4. Generate a password hash:
+#      caddy hash-password --plaintext 'your-chosen-password'
+#    Paste the resulting hash where <HASH> appears below.
+# 5. Reload Caddy:  caddy reload --config Caddyfile
+
+desktop.tail545ad4.ts.net {
+	# Automatic HTTPS via Let's Encrypt (Tailscale provides the cert)
+	reverse_proxy 127.0.0.1:3000
+
+	# Extra auth layer on top of Tailscale's encrypted tunnel.
+	# Username: admin
+	basicauth {
+		admin $2a$14$UtAXl7MwwHAXLMMc8KyGTOjKTCNqsgO9WJDg5mS2jeInie/fx5oLi
+	}
+
+	# Useful logging
+	log {
+		output file C:\Users\kbgam\Documents\dev\dashboard\caddy-access.log
+	}
+}
