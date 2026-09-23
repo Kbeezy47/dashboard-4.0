@@ -1,4 +1,4 @@
-import { DashboardData, MiningStats } from '../types';
+import { DashboardData, MiningStats, WalletBalance } from '../types';
 
 export const fetchDashboardData = async (): Promise<DashboardData> => {
   const response = await fetch('/api/dashboard');
@@ -89,4 +89,13 @@ export const fetchMinerData = async (): Promise<MiningStats> => {
   }
   const payload: MinerPayload = await response.json();
   return normalizeMiningStats(payload);
+};
+
+// The /api/wallet payload, backed by services/get_balance.py (prlctl).
+export const fetchWalletBalance = async (): Promise<WalletBalance> => {
+  const response = await fetch('/api/wallet');
+  if (!response.ok) {
+    throw new Error('Failed to fetch local wallet balance');
+  }
+  return response.json();
 };

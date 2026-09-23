@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { DashboardData, MiningStats } from './types';
-import { fetchDashboardData, fetchMinerData } from './services/api';
+import { DashboardData, MiningStats, WalletBalance } from './types';
+import { fetchDashboardData, fetchMinerData, fetchWalletBalance } from './services/api';
 import Header from './components/Header';
 import SystemInfoPanel from './components/SystemInfoPanel';
 import MiningStatsPanel from './components/MiningStatsPanel';
+import WalletBalancePanel from './components/WalletBalancePanel';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 
 const App: React.FC = () => {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [miningData, setMiningData] = useState<MiningStats | null>(null);
+  const [walletData, setWalletData] = useState<WalletBalance | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -45,15 +47,30 @@ const App: React.FC = () => {
       }
     };
 
+    // The server caches the prlctl result, so this only reads cached state.
+    const fetchWallet = async () => {
+      try {
+        const data = await fetchWalletBalance();
+        if (isMounted) {
+          setWalletData(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch local wallet balance:', err);
+      }
+    };
+
     fetchData(); // Initial fetch
     fetchMining(); // Initial mining fetch
+    fetchWallet(); // Initial wallet fetch
     const intervalId = setInterval(fetchData, 1000); // Poll every 1s per Rainmeter Update=1000
     const miningIntervalId = setInterval(fetchMining, 5000); // Poll mining stats every 5s
+    const walletIntervalId = setInterval(fetchWallet, 15000); // Poll wallet balance every 15s
 
     return () => {
       isMounted = false;
       clearInterval(intervalId);
       clearInterval(miningIntervalId);
+      clearInterval(walletIntervalId);
     };
   }, []);
 
@@ -89,6 +106,7 @@ const App: React.FC = () => {
           <div className="space-y-8">
             <SystemInfoPanel data={dashboardData} />
             <MiningStatsPanel data={miningData} />
+            <WalletBalancePanel wallet={walletData} mining={miningData} />
           </div>
         ) : null}
       </main>

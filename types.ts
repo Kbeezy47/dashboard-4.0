@@ -70,3 +70,15 @@ export interface MiningStats {
   profit24h: string;
   lastUpdated: string;
 }
+
+// Local PRL wallet balance read directly from prlctl (services/get_balance.py).
+// This is the on-chain wallet figure, independent of what the mining pool reports.
+export interface WalletBalance {
+  balance: string;          // Wallet balance, e.g. "1.41"
+  currency: string;         // Ticker, e.g. "PRL"
+  estimatedUsd?: string;    // Fiat estimate derived from the pool's PRL rate
+  available: boolean;       // false when prlctl could not be reached
+  error?: string;           // Diagnostic message for the last failed read
+  lastUpdated: string;      // ISO timestamp of the last successful read
+  source: string;           // e.g. "prlctl"
+}

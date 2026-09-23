@@ -6,7 +6,7 @@ import { createServer as createViteServer } from 'vite';
 import si from 'systeminformation';
 import { initTelegram, client } from "./services/telegramClient";
 import { NewMessage } from "telegram/events";
-import { MiningStats } from './types';
+import { MiningStats, WalletBalance } from './types';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -167,7 +167,13 @@ let cachedSensors: Map<string, HwinfoSensor> | null = null;
 
 async function startServer() {
   // Initialize your existing Express/Bun server logic here...
-  
+
+  // Prime the wallet cache before the (potentially blocking) Telegram auth and
+  // keep it warm on a slow timer. The wallet is read straight from prlctl, so
+  // it stays available even if the Telegram session never comes up.
+  await refreshWalletBalance();
+  setInterval(refreshWalletBalance, WALLET_POLL_MS);
+
   // Initialize Telegram User Client
   await initTelegram();
 
@@ -338,6 +344,88 @@ async function collectMetrics() {
   return { metrics, history: [...historyBuffer] };
 }
 
+// --- Local PRL wallet (services/get_balance.py) ---
+
+const WALLET_SCRIPT = path.join(process.cwd(), 'services', 'get_balance.py');
+const WALLET_POLL_MS = 60_000;
+const WALLET_TIMEOUT_MS = 30_000;
+
+// Windows exposes Python under several names; the first one that responds wins.
+const PYTHON_CANDIDATES = [
+  ...(process.env.PYTHON_BIN ? [process.env.PYTHON_BIN] : []),
+  'python',
+  'python3',
+  'py',
+];
+
+let resolvedPython: string | null = null;
+
+async function resolvePython(): Promise<string> {
+  if (resolvedPython) return resolvedPython;
+
+  for (const bin of PYTHON_CANDIDATES) {
+    try {
+      await execFileAsync(bin, ['--version'], { windowsHide: true });
+    } catch {
+      continue; // Try the next candidate.
+    }
+    resolvedPython = bin;
+    return bin;
+  }
+
+  throw new Error('No Python interpreter found. Set PYTHON_BIN to your python executable.');
+}
+
+const walletData: WalletBalance = {
+  balance: '0',
+  currency: 'PRL',
+  available: false,
+  error: 'Wallet has not been queried yet',
+  lastUpdated: 'Never',
+  source: 'prlctl',
+};
+
+// Derives a USD estimate for the local wallet from the PRL/USD rate that the
+// Kryptex bot reports alongside its own balance figure.
+function estimateWalletUsd(amount: number): string | undefined {
+  const poolBalance = parseFloat(miningData.balance);
+  const poolUsd = parseFloat(miningData.balanceUsd);
+
+  if (!Number.isFinite(poolBalance) || !Number.isFinite(poolUsd) || poolBalance <= 0) {
+    return undefined;
+  }
+
+  return (amount * (poolUsd / poolBalance)).toFixed(2);
+}
+
+// prlctl is a slow wallet RPC call, so the balance is refreshed on a timer and
+// cached instead of being queried on every incoming HTTP request.
+async function refreshWalletBalance(): Promise<void> {
+  try {
+    const bin = await resolvePython();
+    const { stdout } = await execFileAsync(bin, [WALLET_SCRIPT], {
+      windowsHide: true,
+      timeout: WALLET_TIMEOUT_MS,
+      maxBuffer: 1024 * 1024,
+    });
+
+    const value = parseFloat(stdout.trim());
+    if (!Number.isFinite(value)) {
+      throw new Error(`Unexpected wallet output: ${stdout.trim() || '<empty>'}`);
+    }
+
+    walletData.balance = value.toFixed(2);
+    walletData.estimatedUsd = estimateWalletUsd(value);
+    walletData.available = true;
+    walletData.error = undefined;
+    walletData.lastUpdated = new Date().toISOString();
+  } catch (err) {
+    walletData.available = false;
+    walletData.error = err instanceof Error ? err.message : String(err);
+    console.error('Failed to read PRL wallet balance:', walletData.error);
+  }
+}
+
 // --- API Routes ---
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'healthy' });
@@ -378,6 +466,11 @@ app.get('/api/stats', async (_req: Request, res: Response) => {
 // Mining stats from KryptexMonitoringBot
 app.get('/api/miner', (_req: Request, res: Response) => {
   res.json(miningData);
+});
+
+// Local PRL wallet balance read from prlctl
+app.get('/api/wallet', (_req: Request, res: Response) => {
+  res.json(walletData);
 });
 
 // 1. Ensure ViteDevServer is imported at the top of your file
