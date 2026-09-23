@@ -10,7 +10,8 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: '0.0.0.0',
-      port: 3000
+      port: 3000,
+      allowedHosts: ['desktop.tail545ad4.ts.net']
     },
     resolve: {
       alias: {

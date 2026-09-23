@@ -11,6 +11,10 @@
 # 5. Reload Caddy:  caddy reload --config Caddyfile
 
 desktop.tail545ad4.ts.net {
+    tls {
+        get_certificate tailscale
+    }
+    
 	# Automatic HTTPS via Let's Encrypt (Tailscale provides the cert)
 	reverse_proxy 127.0.0.1:3000
 
