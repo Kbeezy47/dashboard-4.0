@@ -1,14 +1,43 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createServer as createViteServer } from 'vite';
 import si from 'systeminformation';
 import { initTelegram, client } from "./services/telegramClient";
 import { NewMessage } from "telegram/events";
-import { MiningStats, WalletBalance } from './types';
+import { MiningStats, WalletBalance, PriceData, PricePoint } from './types';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
+
+// --- PRL Price Data (CoinGecko) ---
+const COINGECKO_API = 'https://api.coingecko.com/api/v3';
+// CoinGecko ID for Pearl (PRL) — the Pearl Research token, NOT "Perle".
+// CoinGecko lists it under the slug "pearl-2" (rank ~134).
+// Override with PRL_COINGECKO_ID if it ever changes.
+const PRL_COINGECKO_ID = process.env.PRL_COINGECKO_ID || 'pearl-2';
+const PRICE_CACHE_MS = 60_000; // Cache price data for 60 seconds
+
+// Cache is keyed by timeframe: a 24h fetch only covers one day, so it cannot
+// be sliced to serve a 7d request.
+const priceCache = new Map<string, { data: PriceData; time: number }>();
+
+// Returns non-internal IPv4 addresses so the startup log can show the URLs
+// other devices on the LAN should use.
+function getLanAddresses(): string[] {
+  const interfaces = os.networkInterfaces();
+  const addresses: string[] = [];
+  for (const list of Object.values(interfaces)) {
+    if (!list) continue;
+    for (const iface of list) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        addresses.push(iface.address);
+      }
+    }
+  }
+  return addresses;
+}
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -28,8 +57,10 @@ if (!process.env.TELEGRAM_SESSION) {
   console.warn('Warning: TELEGRAM_SESSION is not set. Telegram will prompt for interactive login.');
 }
 
-// --- Security: Trust proxy (Caddy) for correct client IPs ---
-app.set('trust proxy', true);
+// --- Security: No reverse proxy in local-only mode ---
+// Caddy/Tailscale handled external access previously. Running locally without
+// a proxy means we should NOT trust X-Forwarded-* headers from clients.
+app.set('trust proxy', false);
 
 // --- Security: HTTP security headers ---
 app.use(helmet({
@@ -461,6 +492,129 @@ async function refreshWalletBalance(): Promise<void> {
   }
 }
 
+// --- PRL Price Data (CoinGecko) ---
+
+// Maps a UI timeframe to the CoinGecko `days` parameter. CoinGecko returns
+// 5-minute granularity for <=1 day and hourly/daily for longer windows.
+function timeframeToDays(timeframe: string): string {
+  switch (timeframe) {
+    case '1h':
+      return '1';
+    case '6h':
+      return '1';
+    case '24h':
+      return '1';
+    case '7d':
+      return '7';
+    case '30d':
+      return '30';
+    default:
+      return '1';
+  }
+}
+
+// Trims the CoinGecko series down to the requested lookback window.
+function sliceToTimeframe(prices: PricePoint[], timeframe: string): PricePoint[] {
+  const now = Date.now();
+  const windowMs: Record<string, number> = {
+    '1h': 60 * 60 * 1000,
+    '6h': 6 * 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+    '30d': 30 * 24 * 60 * 60 * 1000,
+  };
+  const cutoff = now - (windowMs[timeframe] ?? windowMs['24h']);
+  const filtered = prices.filter((p) => p.timestamp >= cutoff);
+  return filtered.length >= 2 ? filtered : prices;
+}
+
+// Fetches the PRL market chart from CoinGecko and normalizes it into PriceData.
+async function fetchPriceData(timeframe: string): Promise<PriceData> {
+  const days = timeframeToDays(timeframe);
+  const url =
+    `${COINGECKO_API}/coins/${PRL_COINGECKO_ID}/market_chart` +
+    `?vs_currency=usd&days=${days}`;
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`CoinGecko responded ${response.status}: ${response.statusText}`);
+  }
+
+  const payload = (await response.json()) as {
+    prices?: [number, number][];
+    total_volumes?: [number, number][];
+  };
+
+  const rawPrices = payload.prices ?? [];
+  if (rawPrices.length === 0) {
+    throw new Error('CoinGecko returned no price points for PRL');
+  }
+
+  // Align volumes to price timestamps when the API supplies them.
+  const volumes = payload.total_volumes ?? [];
+  const volumeByTime = new Map<number, number>();
+  for (const [ts, vol] of volumes) {
+    volumeByTime.set(ts, vol);
+  }
+
+  const prices: PricePoint[] = rawPrices.map(([timestamp, price]) => ({
+    timestamp,
+    price,
+    volume: volumeByTime.get(timestamp),
+  }));
+
+  const windowed = sliceToTimeframe(prices, timeframe);
+  const values = windowed.map((p) => p.price);
+  const currentPrice = values[values.length - 1];
+  const firstPrice = values[0];
+
+  return {
+    prices: windowed,
+    currentPrice,
+    priceChange24h: currentPrice - firstPrice,
+    priceChangePercent24h: firstPrice !== 0 ? ((currentPrice - firstPrice) / firstPrice) * 100 : 0,
+    high24h: Math.max(...values),
+    low24h: Math.min(...values),
+    lastUpdated: Date.now(),
+    available: true,
+  };
+}
+
+// Serves cached price data, refreshing at most once per PRICE_CACHE_MS per timeframe.
+async function getPriceData(timeframe: string): Promise<PriceData> {
+  const now = Date.now();
+  const cached = priceCache.get(timeframe);
+  if (cached && now - cached.time < PRICE_CACHE_MS) {
+    return cached.data;
+  }
+
+  try {
+    const data = await fetchPriceData(timeframe);
+    priceCache.set(timeframe, { data, time: now });
+    return data;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Fall back to a stale entry for this timeframe if we have one.
+    if (cached) {
+      return { ...cached.data, error: message };
+    }
+    return {
+      prices: [],
+      currentPrice: 0,
+      priceChange24h: 0,
+      priceChangePercent24h: 0,
+      high24h: 0,
+      low24h: 0,
+      lastUpdated: now,
+      available: false,
+      error: message,
+    };
+  }
+}
+
 // --- API Routes ---
 app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'healthy' });
@@ -508,6 +662,34 @@ app.get('/api/wallet', (_req: Request, res: Response) => {
   res.json(walletData);
 });
 
+// PRL price history from CoinGecko.
+// Query params:
+//   timeframe - one of 1h | 6h | 24h | 7d | 30d (default 24h)
+app.get('/api/prl-price', async (req: Request, res: Response) => {
+  const raw = req.query.timeframe;
+  const timeframe = typeof raw === 'string' ? raw : '24h';
+  const allowed = ['1h', '6h', '24h', '7d', '30d'];
+  const safeTimeframe = allowed.includes(timeframe) ? timeframe : '24h';
+
+  try {
+    const data = await getPriceData(safeTimeframe);
+    res.json(data);
+  } catch (err) {
+    console.error('Failed to fetch PRL price data:', err);
+    res.status(503).json({
+      prices: [],
+      currentPrice: 0,
+      priceChange24h: 0,
+      priceChangePercent24h: 0,
+      high24h: 0,
+      low24h: 0,
+      lastUpdated: Date.now(),
+      available: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
 // 1. Ensure ViteDevServer is imported at the top of your file
 import { ViteDevServer } from 'vite'; 
 // (assuming your createViteServer import is already there)
@@ -533,8 +715,16 @@ async function setupViteOrStatic() {
     });
   }
 
-  const server = app.listen(PORT, '127.0.0.1', () => {
-    console.log(`Hardware Monitor running on http://127.0.0.1:${PORT} (localhost only - Caddy handles external access)`);
+  // Bind to 0.0.0.0 so the dashboard is reachable from other devices on the
+  // local network (phone, laptop, etc.) without Tailscale. Access is still
+  // confined to the LAN — nothing is exposed to the public internet.
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\nHardware Monitor running (no Tailscale/Caddy needed):`);
+    console.log(`  Local:   http://127.0.0.1:${PORT}`);
+    for (const ip of getLanAddresses()) {
+      console.log(`  Network: http://${ip}:${PORT}`);
+    }
+    console.log('');
   });
 
   const shutdown = async () => {

@@ -1,6 +1,10 @@
 # Caddyfile for the Mining Rig Dashboard
 #
-# SETUP:
+# NOTE: This file is OPTIONAL and only needed for remote/Tailscale access.
+# For local-only access (no Tailscale), you do NOT need Caddy at all.
+# Just run `npm run dev` and open http://127.0.0.1:3000
+#
+# SETUP (only if you want Tailscale/remote access):
 # 1. Install Tailscale on this machine and sign in.
 # 2. Run `tailscale status` (or check the Tailscale admin panel) to find your
 #    MagicDNS name. It looks like:  <device-name>.<tailnet>.ts.net

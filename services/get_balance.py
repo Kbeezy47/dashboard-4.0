@@ -1,56 +1,47 @@
-"""Reads the local PRL wallet balance through the prlctl CLI.
+import urllib.request
+import json
+import re
 
-The balance is printed to stdout as a bare float ("1.41") so Rainmeter can
-format it directly. Diagnostics are written to stderr and failures exit with
-a non-zero status, which lets the dashboard server tell a genuine 0.00
-balance apart from a failed wallet query.
-"""
+ADDRESS = "prl1pydcxqf6kwvzgrqx4gz5nt0mverm9hfkhkdj24k3k5ccjegaaz2mspxjy8f"
+HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
-import os
-import subprocess
-import sys
-
-# Override with the PRLCTL_PATH environment variable if prlctl.exe moves.
-PRLCTL_PATH = os.environ.get(
-    "PRLCTL_PATH",
-    r"C:\Users\kbgam\Documents\Mining\Pearl\prlctl.exe",
-)
-
-
-def get_prl_balance():
-    """Returns the wallet balance as a float, or None if it could not be read."""
+def fetch_balance():
+    # Attempt 1: Try the API endpoint with the required network query parameter
+    api_url = f"https://explorer.pearlresearch.ai/api/address/{ADDRESS}?network=mainnet"
     try:
-        # Executes prlctl using the credentials stored in oyster.conf
-        result = subprocess.run(
-            [PRLCTL_PATH, "--wallet", "getbalance"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return float(result.stdout.strip())
-    except subprocess.CalledProcessError as e:
-        print(f"Wallet RPC error: {e.stderr.strip()}", file=sys.stderr)
-        return None
-    except OSError as e:
-        print(f"Wallet executable error: {e}", file=sys.stderr)
-        return None
-    except ValueError:
-        print(
-            f"Wallet returned a non-numeric balance: {result.stdout.strip()!r}",
-            file=sys.stderr,
-        )
-        return None
+        req = urllib.request.Request(api_url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            
+            if "chain_stats" in data:
+                funded = data["chain_stats"].get("funded_txo_sum", 0)
+                spent = data["chain_stats"].get("spent_txo_sum", 0)
+                return f"{(funded - spent) / 100_000_000:.2f}"
+            elif "balance" in data:
+                bal = float(data["balance"])
+                return f"{bal / 100_000_000:.2f}" if bal > 1_000_000 else f"{bal:.2f}"
+    except Exception:
+        pass  # Fall through to HTML parsing if API fails/404s
 
+    # Attempt 2: Pull the webpage and extract balance from the embedded data/HTML
+    web_url = f"https://explorer.pearlresearch.ai/address/{ADDRESS}?network=mainnet"
+    try:
+        req = urllib.request.Request(web_url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html = response.read().decode('utf-8')
 
-def main():
-    balance = get_prl_balance()
-    if balance is None:
-        return 1
+            # Search for numbers followed by PRL in the page text/json payloads
+            match = re.search(r'([\d\.]+)\s*PRL\s*confirmed', html, re.IGNORECASE)
+            if not match:
+                match = re.search(r'"balance":\s*([\d\.]+)', html)
+            if not match:
+                match = re.search(r'Balance.*?([\d\.]+)', html, re.IGNORECASE)
 
-    # Print only the float value so Rainmeter can format it
-    print(f"{balance:.2f}")
-    return 0
+            if match:
+                return f"{float(match.group(1)):.2f}"
+    except Exception as e:
+        return f"Fetch Error: {e}"
 
+    return "0.00"
 
-if __name__ == "__main__":
-    sys.exit(main())
+print(fetch_balance(), end="")

@@ -82,3 +82,31 @@ export interface WalletBalance {
   lastUpdated: string;      // ISO timestamp of the last successful read
   source: string;           // e.g. "prlctl"
 }
+
+// --- PRL Price Data (CoinGecko) ---
+
+// A single price observation at a point in time.
+export interface PricePoint {
+  timestamp: number;        // Unix ms timestamp
+  price: number;            // Price in USD
+  volume?: number;          // Optional 24h volume in USD
+}
+
+// Historical price series for the PRL chart.
+export interface PriceData {
+  prices: PricePoint[];     // Chronological price series
+  currentPrice: number;     // Most recent price
+  priceChange24h: number;   // Absolute change over the window
+  priceChangePercent24h: number; // Percent change over the window
+  high24h: number;          // Highest price in the window
+  low24h: number;           // Lowest price in the window
+  lastUpdated: number;      // Unix ms timestamp of this snapshot
+  available: boolean;       // false when the upstream fetch failed
+  error?: string;           // Diagnostic message for the last failed fetch
+}
+
+// Supported chart timeframes.
+export type Timeframe = '1h' | '6h' | '24h' | '7d' | '30d';
+
+// Supported averaging algorithms shown as chart tabs.
+export type AverageAlgorithm = 'raw' | 'sma' | 'ema' | 'bb';

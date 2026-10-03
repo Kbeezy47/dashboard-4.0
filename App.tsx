@@ -1,16 +1,21 @@
-import React, { useState, useEffect } from 'react';
-import { DashboardData, MiningStats, WalletBalance } from './types';
-import { fetchDashboardData, fetchMinerData, fetchWalletBalance } from './services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { DashboardData, MiningStats, WalletBalance, PriceData, Timeframe } from './types';
+import { fetchDashboardData, fetchMinerData, fetchWalletBalance, fetchPriceData } from './services/api';
 import Header from './components/Header';
 import SystemInfoPanel from './components/SystemInfoPanel';
 import MiningStatsPanel from './components/MiningStatsPanel';
 import WalletBalancePanel from './components/WalletBalancePanel';
+import PriceChart from './components/PriceChart';
 import { RefreshCw, AlertCircle } from 'lucide-react';
 
 const App: React.FC = () => {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null);
   const [miningData, setMiningData] = useState<MiningStats | null>(null);
   const [walletData, setWalletData] = useState<WalletBalance | null>(null);
+  const [priceData, setPriceData] = useState<PriceData | null>(null);
+  const [priceLoading, setPriceLoading] = useState<boolean>(true);
+  const [priceError, setPriceError] = useState<string | null>(null);
+  const [timeframe, setTimeframe] = useState<Timeframe>('24h');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -74,6 +79,28 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // PRL price history is fetched separately so a slow upstream never blocks
+  // the hardware telemetry loop above.
+  const loadPriceData = useCallback(async (tf: Timeframe) => {
+    setPriceLoading(true);
+    try {
+      const data = await fetchPriceData(tf);
+      setPriceData(data);
+      setPriceError(data.available ? null : (data.error ?? 'Price data unavailable'));
+    } catch (err) {
+      setPriceError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPriceLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadPriceData(timeframe);
+    // CoinGecko data only moves every few minutes, so a 60s poll is plenty.
+    const priceIntervalId = setInterval(() => loadPriceData(timeframe), 60_000);
+    return () => clearInterval(priceIntervalId);
+  }, [timeframe, loadPriceData]);
+
   return (
     <div className="min-h-screen bg-[#121212] text-white font-sans antialiased selection:bg-green-500 selection:text-black">
       <Header />
@@ -107,6 +134,12 @@ const App: React.FC = () => {
             <SystemInfoPanel data={dashboardData} />
             <MiningStatsPanel data={miningData} />
             <WalletBalancePanel wallet={walletData} mining={miningData} />
+            <PriceChart
+              data={priceData}
+              loading={priceLoading}
+              error={priceError}
+              onTimeframeChange={setTimeframe}
+            />
           </div>
         ) : null}
       </main>

@@ -1,4 +1,4 @@
-import { DashboardData, MiningStats, WalletBalance } from '../types';
+import { DashboardData, MiningStats, WalletBalance, PriceData, Timeframe } from '../types';
 
 export const fetchDashboardData = async (): Promise<DashboardData> => {
   const response = await fetch('/api/dashboard');
@@ -96,6 +96,15 @@ export const fetchWalletBalance = async (): Promise<WalletBalance> => {
   const response = await fetch('/api/wallet');
   if (!response.ok) {
     throw new Error('Failed to fetch local wallet balance');
+  }
+  return response.json();
+};
+
+// PRL price history from CoinGecko, proxied through /api/prl-price.
+export const fetchPriceData = async (timeframe: Timeframe = '24h'): Promise<PriceData> => {
+  const response = await fetch(`/api/prl-price?timeframe=${encodeURIComponent(timeframe)}`);
+  if (!response.ok) {
+    throw new Error('Failed to fetch PRL price data');
   }
   return response.json();
 };

@@ -11,7 +11,9 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: 3000,
-      allowedHosts: ['desktop.tail545ad4.ts.net']
+      // Allow access via LAN IP (e.g. 192.168.x.x) from other devices on the
+      // home network. Vite blocks non-localhost hosts by default.
+      allowedHosts: true
     },
     resolve: {
       alias: {
