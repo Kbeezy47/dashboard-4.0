@@ -35,7 +35,7 @@ const WalletBalancePanel: React.FC<WalletBalancePanelProps> = ({ wallet, mining 
   const currency = wallet?.currency || mining?.balanceCurrency || 'PRL';
   const available = wallet?.available === true;
 
-  // Only trust the wallet figure when the last prlctl read actually succeeded,
+  // Only trust the wallet figure when the last explorer read actually succeeded,
   // so a failed query never renders as a real 0.00 balance.
   const walletAmount = available ? toAmount(wallet?.balance) : null;
   const poolAmount = toAmount(mining?.balance);
@@ -71,7 +71,7 @@ const WalletBalancePanel: React.FC<WalletBalancePanelProps> = ({ wallet, mining 
           <div className="flex items-center gap-2">
             <Landmark className="w-4 h-4 text-purple-400" />
             <span className="text-neutral-400 font-medium">Source:</span>
-            <span className="text-white font-semibold">{wallet?.source || 'prlctl'}</span>
+            <span className="text-white font-semibold">{wallet?.source || 'Pearl Explorer API'}</span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -99,9 +99,9 @@ const WalletBalancePanel: React.FC<WalletBalancePanelProps> = ({ wallet, mining 
         <div className="bg-amber-950/40 border border-amber-800/70 text-amber-200 p-4 rounded-xl flex items-start gap-3">
           <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="text-sm">
-            <p className="font-semibold mb-0.5">Unable to read the local PRL wallet</p>
+            <p className="font-semibold mb-0.5">Unable to read the PRL wallet</p>
             <p className="text-amber-300/80 font-mono text-xs break-words">
-              {wallet.error || 'prlctl did not return a balance.'}
+              {wallet.error || 'The Pearl Explorer API did not return a balance.'}
             </p>
           </div>
         </div>
@@ -114,7 +114,7 @@ const WalletBalancePanel: React.FC<WalletBalancePanelProps> = ({ wallet, mining 
             <Landmark className="w-5 h-5 text-purple-400" />
             Local Wallet
           </h2>
-          <span className="text-xs text-neutral-400 font-mono">prlctl • 60s Poll</span>
+          <span className="text-xs text-neutral-400 font-mono">Pearl Explorer API • 60s Poll</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">

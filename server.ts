@@ -69,9 +69,13 @@ app.use(helmet({
 }));
 
 // --- Security: Rate limiting on API routes ---
+// The dashboard polls /api/dashboard every 1s (~60 req/min) plus the miner,
+// wallet and price endpoints, so the window has to be sized for that traffic.
+// A 15-minute/100-request window would trip after ~80 seconds and surface as a
+// full-screen "Hardware API Connection Error" in the UI.
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 1 * 60 * 1000, // 1 minute
+  max: 200, // allow up to 200 requests/minute
   message: { error: 'Too many requests, please try again later' },
   standardHeaders: true,
   legacyHeaders: false,
@@ -85,6 +89,10 @@ const GPU_FAN_MAX_RPM = 3200;
 
 // Telegram mining bot configuration
 const BOT_USERNAME = "KryptexMonitoringBot";
+
+// Set TELEGRAM_DEBUG=1 to dump every raw bot message to the console. Useful
+// when the bot changes its wording and the regexes stop matching.
+const TELEGRAM_DEBUG = process.env.TELEGRAM_DEBUG === '1';
 
 // Structured state holding parsed mining values
 const miningData: MiningStats = {
@@ -145,8 +153,12 @@ function applyBalanceSplit() {
   miningData.balanceConfirmed = formatCryptoAmount(confirmed, 2);
 }
 
-// Regex parsers for bot outputs
-function parseBotMessage(text: string) {
+// Regex parsers for bot outputs.
+// Returns true when at least one field was recognised so the caller can log
+// messages that match no known format (the bot's wording changes over time).
+function parseBotMessage(text: string): boolean {
+  let matched = false;
+
   // 1. Parse Workers response
   if (text.includes("Average hashrate") || text.includes("Total hashrate")) {
     // Matches line: "<WorkerName>: <status>, <hashrate>." (e.g., "SSD1: active, 113.91 TH/s.")
@@ -163,49 +175,49 @@ function parseBotMessage(text: string) {
     if (totalMatch) miningData.totalHashrate30m = totalMatch[1].trim();
 
     miningData.lastUpdated = new Date().toLocaleTimeString();
+    matched = true;
   }
 
-  // 2. Parse Wallets response
-  const hasBalanceLine = text.includes("Balance:");
-  const hasPayoutLine = text.includes("Left for payment:") || text.includes("Pending:");
+  // 2. Parse Wallets response.
+  // Every field is parsed independently. Requiring all of them to be present
+  // meant a single changed label silently dropped the entire wallet block and
+  // left the UI showing 0.
+  // "Balance: 0.938014 PRL (0.91 USD)."
+  const balanceMatch = text.match(
+    /Balance:\s*([\d.,]+)\s*([A-Za-z]+)?\s*(?:\(\s*([\d.,]+)\s*USD\s*\))?/i
+  );
+  if (balanceMatch) {
+    miningData.balance = balanceMatch[1].replace(/,/g, "").trim();
+    if (balanceMatch[2]) miningData.balanceCurrency = balanceMatch[2].trim();
+    if (balanceMatch[3]) miningData.balanceUsd = balanceMatch[3].replace(/,/g, "").trim();
+    matched = true;
+  }
 
-  if (hasBalanceLine && hasPayoutLine) {
-    // "Balance: 0.938014 PRL (0.91 USD)."
-    const balanceMatch = text.match(
-      /Balance:\s*([\d.,]+)\s*([A-Za-z]+)\s*\(\s*([\d.,]+)\s*USD\s*\)/i
-    );
-    if (balanceMatch) {
-      miningData.balance = balanceMatch[1].replace(/,/g, "").trim();
-      miningData.balanceCurrency = balanceMatch[2].trim();
-      miningData.balanceUsd = balanceMatch[3].replace(/,/g, "").trim();
-    } else {
-      // Fallback for a balance line without the USD portion.
-      const looseMatch = text.match(/Balance:\s*([\d.,]+)\s*([A-Za-z]+)?/i);
-      if (looseMatch) {
-        miningData.balance = looseMatch[1].replace(/,/g, "").trim();
-        if (looseMatch[2]) miningData.balanceCurrency = looseMatch[2].trim();
-      }
-    }
+  // "Left for payment: 1.475789 / 1.0 PRL (28%)."
+  // The percentage here is the remaining amount needed to reach the threshold.
+  const leftMatch = text.match(
+    /(?:Left for payment|Pending)[^:\n]*:\s*([\d.,]+)\s*\/\s*([\d.,]+)\s*([A-Za-z]+)?\s*(?:\(\s*([\d.,]+)\s*%\s*\))?/i
+  );
+  if (leftMatch) {
+    miningData.payoutThreshold = leftMatch[2].replace(/,/g, "").trim();
+    if (leftMatch[3] && !miningData.balanceCurrency) miningData.balanceCurrency = leftMatch[3].trim();
+    const parsedPercent = leftMatch[4] ? parseFloat(leftMatch[4].replace(/,/g, "")) : NaN;
+    miningData.unconfirmedPercent = Number.isFinite(parsedPercent) ? parsedPercent : 0;
+    matched = true;
+  }
 
-    // "Left for payment: 1.475789 / 1.0 PRL (28%)."
-    // The percentage here is the remaining amount needed to reach the threshold.
-    const leftMatch = text.match(
-      /(?:Left for payment|Pending)[^:]*:\s*([\d.,]+)\s*\/\s*([\d.,]+)\s*([A-Za-z]+)\s*\(\s*([\d.,]+)\s*%\s*\)/i
-    );
-    if (leftMatch) {
-      miningData.payoutThreshold = leftMatch[2].replace(/,/g, "").trim();
-      if (!miningData.balanceCurrency) miningData.balanceCurrency = leftMatch[3].trim();
-      const parsedPercent = parseFloat(leftMatch[4].replace(/,/g, ""));
-      miningData.unconfirmedPercent = Number.isFinite(parsedPercent) ? parsedPercent : 0;
-    }
+  const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
+  if (profitMatch) {
+    miningData.profit24h = profitMatch[1].trim() + " PRL";
+    matched = true;
+  }
 
-    const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
-    if (profitMatch) miningData.profit24h = profitMatch[1].trim() + " PRL";
-
+  if (matched) {
     applyBalanceSplit();
-
     miningData.lastUpdated = new Date().toLocaleTimeString();
   }
+
+  return matched;
 }
 
 interface HistoryPoint {
@@ -235,8 +247,8 @@ async function startServer() {
   // Initialize your existing Express/Bun server logic here...
 
   // Prime the wallet cache before the (potentially blocking) Telegram auth and
-  // keep it warm on a slow timer. The wallet is read straight from prlctl, so
-  // it stays available even if the Telegram session never comes up.
+  // keep it warm on a slow timer. The wallet is read from the Pearl Explorer
+  // Web API, so it stays available even if the Telegram session never comes up.
   await refreshWalletBalance();
   setInterval(refreshWalletBalance, WALLET_POLL_MS);
 
@@ -246,8 +258,19 @@ async function startServer() {
   // Event listener for incoming replies from KryptexMonitoringBot
   client.addEventHandler((event: any) => {
     const rawText = event.message?.message;
-    if (rawText) {
-      parseBotMessage(rawText);
+    if (!rawText) return;
+
+    if (TELEGRAM_DEBUG) {
+      console.log(`[telegram] message from ${BOT_USERNAME}:\n${rawText}\n---`);
+    }
+
+    try {
+      const matched = parseBotMessage(rawText);
+      if (!matched) {
+        console.warn(`[telegram] unrecognised bot message:\n${rawText}\n---`);
+      }
+    } catch (err) {
+      console.error("Error parsing Telegram message:", err, "\nRaw Text:\n", rawText);
     }
   }, new NewMessage({ chats: [BOT_USERNAME] }));
 
@@ -410,37 +433,26 @@ async function collectMetrics() {
   return { metrics, history: [...historyBuffer] };
 }
 
-// --- Local PRL wallet (services/get_balance.py) ---
+// --- PRL wallet balance (Pearl Explorer) ---
+// The balance is read straight from the explorer over HTTP, so no local Python
+// runtime or prlctl subprocess is required.
+//
+// The explorer is a Next.js app that exposes NO public JSON API: /api/address/*
+// returns 404. The balance is therefore read from the address page, which
+// embeds an "addressInfo" object in its React Server Component (RSC) payload.
 
-const WALLET_SCRIPT = path.join(process.cwd(), 'services', 'get_balance.py');
+const WALLET_ADDRESS =
+  process.env.PRL_WALLET_ADDRESS ||
+  'prl1pydcxqf6kwvzgrqx4gz5nt0mverm9hfkhkdj24k3k5ccjegaaz2mspxjy8f';
+const WALLET_API_URL = `https://explorer.pearlresearch.ai/api/address/${WALLET_ADDRESS}?network=mainnet`;
+const WALLET_PAGE_URL = `https://explorer.pearlresearch.ai/address/${WALLET_ADDRESS}?network=mainnet`;
 const WALLET_POLL_MS = 60_000;
-const WALLET_TIMEOUT_MS = 30_000;
+const WALLET_TIMEOUT_MS = 15_000;
 
-// Windows exposes Python under several names; the first one that responds wins.
-const PYTHON_CANDIDATES = [
-  ...(process.env.PYTHON_BIN ? [process.env.PYTHON_BIN] : []),
-  'python',
-  'python3',
-  'py',
-];
-
-let resolvedPython: string | null = null;
-
-async function resolvePython(): Promise<string> {
-  if (resolvedPython) return resolvedPython;
-
-  for (const bin of PYTHON_CANDIDATES) {
-    try {
-      await execFileAsync(bin, ['--version'], { windowsHide: true });
-    } catch {
-      continue; // Try the next candidate.
-    }
-    resolvedPython = bin;
-    return bin;
-  }
-
-  throw new Error('No Python interpreter found. Set PYTHON_BIN to your python executable.');
-}
+const EXPLORER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+  'Accept-Encoding': 'gzip, deflate',
+};
 
 const walletData: WalletBalance = {
   balance: '0',
@@ -448,7 +460,7 @@ const walletData: WalletBalance = {
   available: false,
   error: 'Wallet has not been queried yet',
   lastUpdated: 'Never',
-  source: 'prlctl',
+  source: 'Pearl Explorer API',
 };
 
 // Derives a USD estimate for the local wallet from the PRL/USD rate that the
@@ -464,31 +476,109 @@ function estimateWalletUsd(amount: number): string | undefined {
   return (amount * (poolUsd / poolBalance)).toFixed(2);
 }
 
-// prlctl is a slow wallet RPC call, so the balance is refreshed on a timer and
-// cached instead of being queried on every incoming HTTP request.
-async function refreshWalletBalance(): Promise<void> {
+// Reads the wallet balance from the explorer, trying the cheapest source first.
+// Throws when every strategy fails so the caller can mark the wallet offline.
+async function fetchExplorerBalance(): Promise<number> {
+  const failures: string[] = [];
+
+  // 1. Public JSON API (esplora-style). Currently 404s, but kept so the code
+  //    starts working automatically if the explorer ever exposes it.
   try {
-    const bin = await resolvePython();
-    const { stdout } = await execFileAsync(bin, [WALLET_SCRIPT], {
-      windowsHide: true,
-      timeout: WALLET_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
+    const res = await fetch(WALLET_API_URL, {
+      headers: EXPLORER_HEADERS,
+      signal: AbortSignal.timeout(WALLET_TIMEOUT_MS),
     });
 
-    const value = parseFloat(stdout.trim());
-    if (!Number.isFinite(value)) {
-      throw new Error(`Unexpected wallet output: ${stdout.trim() || '<empty>'}`);
+    if (res.ok) {
+      const data = (await res.json()) as any;
+
+      if (data.chain_stats) {
+        const funded = data.chain_stats.funded_txo_sum ?? 0;
+        const spent = data.chain_stats.spent_txo_sum ?? 0;
+        return (funded - spent) / 100_000_000;
+      }
+
+      if (data.balance !== undefined) {
+        const bal = parseFloat(data.balance);
+        if (Number.isFinite(bal)) return bal > 1_000_000 ? bal / 100_000_000 : bal;
+      }
+    } else {
+      failures.push(`JSON API returned HTTP ${res.status}`);
+    }
+  } catch (err) {
+    failures.push(`JSON API failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 2. React Server Component payload of the address page. Much smaller than the
+  //    full HTML document and carries the same "addressInfo" object.
+  try {
+    const res = await fetch(WALLET_PAGE_URL, {
+      headers: { ...EXPLORER_HEADERS, RSC: '1' },
+      signal: AbortSignal.timeout(WALLET_TIMEOUT_MS),
+    });
+
+    if (res.ok) {
+      const text = await res.text();
+      const match = text.match(/"addressInfo":\s*(\{[^{}]*\})/);
+      if (match) {
+        const info = JSON.parse(match[1]) as { balance?: number | string };
+        const value =
+          typeof info.balance === 'string' ? parseFloat(info.balance) : Number(info.balance);
+        if (Number.isFinite(value)) return value;
+      }
+      failures.push('RSC payload did not contain addressInfo');
+    } else {
+      failures.push(`Address page returned HTTP ${res.status}`);
+    }
+  } catch (err) {
+    failures.push(`RSC fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // 3. Last resort: scrape the rendered HTML for the balance figure.
+  try {
+    const res = await fetch(WALLET_PAGE_URL, {
+      headers: EXPLORER_HEADERS,
+      signal: AbortSignal.timeout(WALLET_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Explorer page returned HTTP ${res.status}`);
     }
 
-    walletData.balance = value.toFixed(2);
-    walletData.estimatedUsd = estimateWalletUsd(value);
+    const html = await res.text();
+    const match =
+      html.match(/"balance":\s*([\d.]+)/) ??
+      html.match(/Balance<\/h3><p[^>]*>([\d.]+)/i);
+
+    if (match) {
+      const value = parseFloat(match[1]);
+      if (Number.isFinite(value)) return value;
+    }
+
+    failures.push('HTML did not contain a balance figure');
+  } catch (err) {
+    failures.push(`HTML fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  throw new Error(`Unable to read wallet balance (${failures.join('; ')})`);
+}
+
+// The explorer call is a network round trip, so the balance is refreshed on a
+// timer and cached instead of being queried on every incoming HTTP request.
+async function refreshWalletBalance(): Promise<void> {
+  try {
+    const balanceVal = await fetchExplorerBalance();
+
+    walletData.balance = balanceVal.toFixed(2);
+    walletData.estimatedUsd = estimateWalletUsd(balanceVal);
     walletData.available = true;
+    walletData.source = 'Pearl Explorer API';
     walletData.error = undefined;
     walletData.lastUpdated = new Date().toISOString();
   } catch (err) {
     walletData.available = false;
     walletData.error = err instanceof Error ? err.message : String(err);
-    console.error('Failed to read PRL wallet balance:', walletData.error);
+    console.error('Failed to query Pearl Explorer:', walletData.error);
   }
 }
 
@@ -657,7 +747,7 @@ app.get('/api/miner', (_req: Request, res: Response) => {
   res.json(miningData);
 });
 
-// Local PRL wallet balance read from prlctl
+// PRL wallet balance read from the Pearl Explorer Web API
 app.get('/api/wallet', (_req: Request, res: Response) => {
   res.json(walletData);
 });

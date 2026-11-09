@@ -52,7 +52,7 @@ const App: React.FC = () => {
       }
     };
 
-    // The server caches the prlctl result, so this only reads cached state.
+    // The server caches the explorer result, so this only reads cached state.
     const fetchWallet = async () => {
       try {
         const data = await fetchWalletBalance();

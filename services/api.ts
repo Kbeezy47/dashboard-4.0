@@ -91,7 +91,7 @@ export const fetchMinerData = async (): Promise<MiningStats> => {
   return normalizeMiningStats(payload);
 };
 
-// The /api/wallet payload, backed by services/get_balance.py (prlctl).
+// The /api/wallet payload, backed by the Pearl Explorer Web API on the server.
 export const fetchWalletBalance = async (): Promise<WalletBalance> => {
   const response = await fetch('/api/wallet');
   if (!response.ok) {
