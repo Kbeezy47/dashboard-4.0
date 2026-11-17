@@ -1,4 +1,4 @@
-import { DashboardData, MiningStats, WalletBalance, PriceData, Timeframe } from '../types';
+import { DashboardData, MiningStats, WalletBalance, PoolBalance, PriceData, Timeframe } from '../types';
 
 export const fetchDashboardData = async (): Promise<DashboardData> => {
   const response = await fetch('/api/dashboard');
@@ -14,6 +14,7 @@ export const fetchDashboardData = async (): Promise<DashboardData> => {
 type MinerPayload = Partial<MiningStats> & { pending?: string };
 
 const DEFAULT_CURRENCY = 'PRL';
+const DEFAULT_THRESHOLD = 1;
 
 // Pulls the first number out of a raw bot string.
 function toNumber(raw: string | undefined | null): number | null {
@@ -42,6 +43,82 @@ function formatAmount(value: number): string {
     .replace(/\.$/, '');
 }
 
+// The pool tracks PRL to 6 decimal places.
+function round6(value: number): number {
+  return Number.isFinite(value) ? Number(value.toFixed(6)) : 0;
+}
+
+interface DerivedSplit {
+  confirmed: number;
+  unconfirmed: number;
+  total: number;
+  threshold: number;
+}
+
+const EMPTY_POOL_BALANCE: PoolBalance = {
+  confirmed: 0,
+  unconfirmed: 0,
+  pending: 0,
+  total: 0,
+  threshold: DEFAULT_THRESHOLD,
+  thresholdProgressPct: 0,
+  source: 'unavailable',
+  available: false,
+  lastUpdated: 'Never',
+};
+
+/**
+ * Normalizes the explicit pool balance contract. The server already returns
+ * exact confirmed/unconfirmed numbers, so they are passed through untouched.
+ * Legacy payloads (raw bot strings only) get a derived split as a fallback.
+ */
+function normalizePoolBalancePayload(
+  pb: PoolBalance | undefined,
+  derived: DerivedSplit,
+  lastUpdated: string,
+): PoolBalance {
+  if (pb && Number.isFinite(pb.confirmed) && Number.isFinite(pb.unconfirmed)) {
+    const confirmed = round6(pb.confirmed);
+    const unconfirmed = round6(pb.unconfirmed);
+    const threshold = Number.isFinite(pb.threshold) && pb.threshold > 0
+      ? pb.threshold
+      : DEFAULT_THRESHOLD;
+
+    return {
+      confirmed,
+      unconfirmed,
+      pending: Number.isFinite(pb.pending) ? round6(pb.pending) : unconfirmed,
+      total: Number.isFinite(pb.total) ? round6(pb.total) : round6(confirmed + unconfirmed),
+      threshold,
+      // Only confirmed PRL counts toward the payout threshold.
+      thresholdProgressPct: Number.isFinite(pb.thresholdProgressPct)
+        ? pb.thresholdProgressPct
+        : round6((confirmed / threshold) * 100),
+      source: pb.source ?? 'kryptex-pool',
+      available: pb.available ?? true,
+      lastUpdated: pb.lastUpdated ?? lastUpdated,
+      error: pb.error,
+    };
+  }
+
+  const { confirmed, unconfirmed, total, threshold } = derived;
+  const safeThreshold = threshold > 0 ? threshold : DEFAULT_THRESHOLD;
+  const hasData = total > 0 || confirmed > 0 || unconfirmed > 0;
+
+  return {
+    ...EMPTY_POOL_BALANCE,
+    confirmed: round6(confirmed),
+    unconfirmed: round6(unconfirmed),
+    pending: round6(unconfirmed),
+    total: round6(total || confirmed + unconfirmed),
+    threshold: safeThreshold,
+    thresholdProgressPct: round6((confirmed / safeThreshold) * 100),
+    source: hasData ? 'telegram-estimate' : 'unavailable',
+    available: hasData,
+    lastUpdated,
+  };
+}
+
 // Guarantees the UI always receives a fully populated MiningStats object,
 // deriving the confirmed/unconfirmed split when the server did not supply it.
 function normalizeMiningStats(payload: MinerPayload): MiningStats {
@@ -62,8 +139,18 @@ function normalizeMiningStats(payload: MinerPayload): MiningStats {
     ? Math.min(100, Math.max(0, rawPercent as number))
     : (toPercent(payload.pending) ?? 0);
 
-  const unconfirmed = total * (percent / 100);
-  const confirmed = total - unconfirmed;
+  // Prefer the server's explicit split strings; only derive for legacy payloads.
+  const confirmed = toNumber(payload.balanceConfirmed) ?? total - total * (percent / 100);
+  const unconfirmed = toNumber(payload.balanceUnconfirmed) ?? total * (percent / 100);
+  const threshold =
+    toNumber(payload.payoutThreshold) ?? toNumber(thresholdMatch?.[1]) ?? DEFAULT_THRESHOLD;
+
+  const lastUpdated = payload.lastUpdated ?? 'Never';
+  const poolBalance = normalizePoolBalancePayload(
+    payload.poolBalance,
+    { confirmed, unconfirmed, total, threshold },
+    lastUpdated,
+  );
 
   return {
     workerStatus: payload.workerStatus ?? 'offline',
@@ -73,12 +160,15 @@ function normalizeMiningStats(payload: MinerPayload): MiningStats {
     balance: formatAmount(total),
     balanceCurrency: currency,
     balanceUsd: payload.balanceUsd || usdMatch?.[1] || '0',
-    balanceConfirmed: payload.balanceConfirmed ?? formatAmount(confirmed),
-    balanceUnconfirmed: payload.balanceUnconfirmed ?? formatAmount(unconfirmed),
+    balanceConfirmed: payload.balanceConfirmed ?? confirmed.toFixed(6),
+    balanceUnconfirmed: payload.balanceUnconfirmed ?? unconfirmed.toFixed(6),
     unconfirmedPercent: percent,
     payoutThreshold: payload.payoutThreshold || thresholdMatch?.[1] || '0',
+    poolBalance,
     profit24h: payload.profit24h ?? '0',
-    lastUpdated: payload.lastUpdated ?? 'Never',
+    profit7d: payload.profit7d,
+    profit30d: payload.profit30d,
+    lastUpdated,
   };
 }
 
@@ -89,6 +179,20 @@ export const fetchMinerData = async (): Promise<MiningStats> => {
   }
   const payload: MinerPayload = await response.json();
   return normalizeMiningStats(payload);
+};
+
+// Clean, explicit PRL pool balance contract from /api/pool-balance.
+export const fetchPoolBalance = async (): Promise<PoolBalance> => {
+  const response = await fetch('/api/pool-balance');
+  if (!response.ok) {
+    throw new Error('Failed to fetch PRL pool balance');
+  }
+  const payload: PoolBalance = await response.json();
+  return normalizePoolBalancePayload(
+    payload,
+    { confirmed: 0, unconfirmed: 0, total: 0, threshold: DEFAULT_THRESHOLD },
+    payload.lastUpdated ?? 'Never',
+  );
 };
 
 // The /api/wallet payload, backed by the Pearl Explorer Web API on the server.

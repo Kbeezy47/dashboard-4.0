@@ -5,9 +5,15 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createServer as createViteServer } from 'vite';
 import si from 'systeminformation';
-import { initTelegram, client } from "./services/telegramClient";
+import { initTelegram, client, parseTelegramBalance, TelegramBalance } from "./services/telegramClient";
 import { NewMessage } from "telegram/events";
-import { MiningStats, WalletBalance, PriceData, PricePoint } from './types';
+import { MiningStats, WalletBalance, PoolBalance, PriceData, PricePoint } from './types';
+import {
+  fetchKryptexPoolSplit,
+  normalizePoolBalance,
+  DEFAULT_PAYOUT_THRESHOLD,
+  PoolSplit,
+} from './services/poolBalance';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 
@@ -94,6 +100,27 @@ const BOT_USERNAME = "KryptexMonitoringBot";
 // when the bot changes its wording and the regexes stop matching.
 const TELEGRAM_DEBUG = process.env.TELEGRAM_DEBUG === '1';
 
+// --- PRL pool balance state ---------------------------------------------------
+//
+// The exact confirmed / unconfirmed split comes from the Kryptex pool page. The
+// Telegram bot only supplies a TOTAL balance plus a rounded threshold
+// percentage, so its split is kept purely as a fallback estimate.
+const POOL_BALANCE_POLL_MS = 60_000;
+const POOL_SPLIT_MAX_AGE_MS = 10 * 60_000;
+
+let telegramEstimate: TelegramBalance | null = null;
+let telegramThreshold = DEFAULT_PAYOUT_THRESHOLD;
+let lastExactSplit: PoolSplit | null = null;
+let lastExactAt = 0;
+
+let poolBalance: PoolBalance = normalizePoolBalance(
+  null,
+  DEFAULT_PAYOUT_THRESHOLD,
+  'unavailable',
+  'Never',
+  'Pool balance has not been queried yet',
+);
+
 // Structured state holding parsed mining values
 const miningData: MiningStats = {
   workerStatus: "offline",
@@ -103,10 +130,11 @@ const miningData: MiningStats = {
   balance: "0",
   balanceCurrency: "PRL",
   balanceUsd: "0",
-  balanceConfirmed: "0",
-  balanceUnconfirmed: "0",
+  balanceConfirmed: "0.000000",
+  balanceUnconfirmed: "0.000000",
   unconfirmedPercent: 0,
-  payoutThreshold: "0",
+  payoutThreshold: String(DEFAULT_PAYOUT_THRESHOLD),
+  poolBalance,
   profit24h: "0",
   lastUpdated: "Never",
 };
@@ -114,7 +142,7 @@ const miningData: MiningStats = {
 // Formats a crypto amount, optionally locking to a specific decimal count
 function formatCryptoAmount(value: number, fixedDecimals?: number): string {
   if (!Number.isFinite(value)) return "0";
-  
+
   if (fixedDecimals !== undefined) {
     return value.toFixed(fixedDecimals);
   }
@@ -126,31 +154,85 @@ function formatCryptoAmount(value: number, fixedDecimals?: number): string {
   return trimmed === "" || trimmed === "-0" ? "0" : trimmed;
 }
 
-// Splits the total balance into confirmed / unconfirmed using the
-// "Left for payment" percentage, which represents the remaining distance 
-// to the payout threshold from the confirmed balance.
-function applyBalanceSplit() {
-  const total = parseFloat(miningData.balance);
-  const threshold = parseFloat(miningData.payoutThreshold);
-  const leftPercent = miningData.unconfirmedPercent;
+// Rebuilds the normalized balance contract from the best available source.
+// An exact pool split always wins over the rounded Telegram estimate.
+function applyPoolBalance(): void {
+  const exact = lastExactSplit && Date.now() - lastExactAt < POOL_SPLIT_MAX_AGE_MS
+    ? lastExactSplit
+    : null;
 
-  if (!Number.isFinite(total) || !Number.isFinite(threshold)) {
-    miningData.balanceConfirmed = "0";
-    miningData.balanceUnconfirmed = "0";
-    return;
+  if (exact) {
+    poolBalance = normalizePoolBalance(
+      exact,
+      telegramThreshold,
+      'kryptex-pool',
+      new Date(lastExactAt).toISOString(),
+    );
+  } else if (
+    telegramEstimate?.confirmed !== undefined &&
+    telegramEstimate.unconfirmed !== undefined
+  ) {
+    poolBalance = normalizePoolBalance(
+      {
+        confirmed: telegramEstimate.confirmed,
+        unconfirmed: telegramEstimate.unconfirmed,
+        total: telegramEstimate.total ?? telegramEstimate.confirmed + telegramEstimate.unconfirmed,
+      },
+      telegramThreshold,
+      'telegram-estimate',
+      new Date().toISOString(),
+      'Exact pool split unavailable; using the rounded Telegram percentage estimate',
+    );
+  } else {
+    poolBalance = normalizePoolBalance(
+      null,
+      telegramThreshold,
+      'unavailable',
+      new Date().toISOString(),
+      'No exact pool split and no Telegram balance data available',
+    );
   }
 
-  const safeLeftPercent = Number.isFinite(leftPercent) ? Math.min(100, Math.max(0, leftPercent)) : 0;
-  
-  // Confirmed = Threshold * (100% - Left%)
-  const confirmed = threshold * (1 - (safeLeftPercent / 100));
-  
-  // Pending = Total - Confirmed
-  const unconfirmed = Math.max(0, total - confirmed);
+  miningData.poolBalance = poolBalance;
+  applyBalanceSplit();
+}
 
-  // Lock both values to exactly 2 decimal places for UI uniformity
-  miningData.balanceUnconfirmed = formatCryptoAmount(unconfirmed, 2);
-  miningData.balanceConfirmed = formatCryptoAmount(confirmed, 2);
+// Mirrors the normalized contract into the legacy string fields used by the UI.
+// Both confirmed and unconfirmed are locked to the pool's 6-decimal precision;
+// the total is NEVER copied wholesale into unconfirmed.
+function applyBalanceSplit(): void {
+  const { confirmed, unconfirmed, total, threshold, available } = poolBalance;
+
+  miningData.balanceConfirmed = confirmed.toFixed(6);
+  miningData.balanceUnconfirmed = unconfirmed.toFixed(6);
+  miningData.unconfirmedPercent = total > 0
+    ? Number(((unconfirmed / total) * 100).toFixed(2))
+    : 0;
+  miningData.payoutThreshold = String(threshold);
+
+  // If Telegram never delivered a total, fall back to the pool's own total so
+  // the "Total Balance" card is not stuck at 0.
+  if (available && (!Number.isFinite(parseFloat(miningData.balance)) || parseFloat(miningData.balance) === 0)) {
+    miningData.balance = total.toFixed(6);
+  }
+}
+
+// Refreshes the exact split from the Kryptex pool. Called on a timer and at
+// startup; failures leave the previous exact split (or the Telegram fallback)
+// in place instead of dumping the total into unconfirmed.
+async function refreshPoolBalance(): Promise<void> {
+  try {
+    const split = await fetchKryptexPoolSplit(WALLET_ADDRESS);
+    if (split) {
+      lastExactSplit = split;
+      lastExactAt = Date.now();
+    } else {
+      console.warn('[pool] falling back to the Telegram balance estimate');
+    }
+  } catch (err) {
+    console.error('[pool] failed to refresh pool balance:', err);
+  }
+  applyPoolBalance();
 }
 
 // Regex parsers for bot outputs.
@@ -178,42 +260,27 @@ function parseBotMessage(text: string): boolean {
     matched = true;
   }
 
-  // 2. Parse Wallets response.
-  // Every field is parsed independently. Requiring all of them to be present
-  // meant a single changed label silently dropped the entire wallet block and
-  // left the UI showing 0.
-  // "Balance: 0.938014 PRL (0.91 USD)."
-  const balanceMatch = text.match(
-    /Balance:\s*([\d.,]+)\s*([A-Za-z]+)?\s*(?:\(\s*([\d.,]+)\s*USD\s*\))?/i
-  );
-  if (balanceMatch) {
-    miningData.balance = balanceMatch[1].replace(/,/g, "").trim();
-    if (balanceMatch[2]) miningData.balanceCurrency = balanceMatch[2].trim();
-    if (balanceMatch[3]) miningData.balanceUsd = balanceMatch[3].replace(/,/g, "").trim();
-    matched = true;
-  }
+  // 2. Parse Wallets response via the dedicated Telegram parser.
+  // "Balance: 0.819305 PRL (1.33 USD)." is the TOTAL, not the unconfirmed
+  // balance. "Balance / threshold: 0.819305 / 1.0 PRL (49%)." carries the
+  // rounded confirmed/threshold percentage used only for the fallback split.
+  const wallet = parseTelegramBalance(text);
+  if (wallet) {
+    if (wallet.total !== undefined) miningData.balance = formatCryptoAmount(wallet.total, 6);
+    if (wallet.currency) miningData.balanceCurrency = wallet.currency;
+    if (wallet.usd) miningData.balanceUsd = wallet.usd;
+    if (wallet.threshold !== undefined) telegramThreshold = wallet.threshold;
+    if (wallet.profit24h) miningData.profit24h = wallet.profit24h;
+    if (wallet.profit7d) miningData.profit7d = wallet.profit7d;
+    if (wallet.profit30d) miningData.profit30d = wallet.profit30d;
 
-  // "Left for payment: 1.475789 / 1.0 PRL (28%)."
-  // The percentage here is the remaining amount needed to reach the threshold.
-  const leftMatch = text.match(
-    /(?:Left for payment|Pending)[^:\n]*:\s*([\d.,]+)\s*\/\s*([\d.,]+)\s*([A-Za-z]+)?\s*(?:\(\s*([\d.,]+)\s*%\s*\))?/i
-  );
-  if (leftMatch) {
-    miningData.payoutThreshold = leftMatch[2].replace(/,/g, "").trim();
-    if (leftMatch[3] && !miningData.balanceCurrency) miningData.balanceCurrency = leftMatch[3].trim();
-    const parsedPercent = leftMatch[4] ? parseFloat(leftMatch[4].replace(/,/g, "")) : NaN;
-    miningData.unconfirmedPercent = Number.isFinite(parsedPercent) ? parsedPercent : 0;
-    matched = true;
-  }
-
-  const profitMatch = text.match(/Profit for last 24 hours[^:]*:\s*([\d\.]+)/i);
-  if (profitMatch) {
-    miningData.profit24h = profitMatch[1].trim() + " PRL";
+    telegramEstimate = wallet;
+    // Recompute locally (no network): a cached exact pool split still wins.
+    applyPoolBalance();
     matched = true;
   }
 
   if (matched) {
-    applyBalanceSplit();
     miningData.lastUpdated = new Date().toLocaleTimeString();
   }
 
@@ -252,8 +319,20 @@ async function startServer() {
   await refreshWalletBalance();
   setInterval(refreshWalletBalance, WALLET_POLL_MS);
 
-  // Initialize Telegram User Client
-  await initTelegram();
+  // Prime the exact pool balance split from the Kryptex miner stats page. This
+  // is independent of Telegram, so the confirmed/unconfirmed figures are exact
+  // even when the bot session is unavailable.
+  await refreshPoolBalance();
+  setInterval(refreshPoolBalance, POOL_BALANCE_POLL_MS);
+
+  // Initialize Telegram User Client. A failed/blocked auth must not take the
+  // whole dashboard down: the exact pool balance and hardware endpoints are
+  // independent of Telegram and must keep serving data.
+  try {
+    await initTelegram();
+  } catch (err) {
+    console.error('[telegram] initialization failed; bot data unavailable:', err);
+  }
 
   // Event listener for incoming replies from KryptexMonitoringBot
   client.addEventHandler((event: any) => {
@@ -742,9 +821,17 @@ app.get('/api/stats', async (_req: Request, res: Response) => {
   }
 });
 
-// Mining stats from KryptexMonitoringBot
+// Mining stats from KryptexMonitoringBot. `poolBalance` is the explicit,
+// normalized confirmed/unconfirmed contract (exact values from the pool page,
+// falling back to the rounded Telegram estimate).
 app.get('/api/miner', (_req: Request, res: Response) => {
-  res.json(miningData);
+  res.json({ ...miningData, poolBalance });
+});
+
+// Clean, explicit PRL pool balance contract:
+//   confirmed, unconfirmed/pending, total, threshold, thresholdProgressPct
+app.get('/api/pool-balance', (_req: Request, res: Response) => {
+  res.json(poolBalance);
 });
 
 // PRL wallet balance read from the Pearl Explorer Web API

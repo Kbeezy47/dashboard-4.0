@@ -39,14 +39,32 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
 
   const currency = data?.balanceCurrency || 'PRL';
 
-  // The bot reports the unconfirmed share of the balance as a percentage
-  // on the "Left for payment" line. Confirmed is simply the remainder.
-  const unconfirmedPercent = Number.isFinite(data?.unconfirmedPercent)
-    ? Math.min(100, Math.max(0, data?.unconfirmedPercent ?? 0))
-    : null;
-  const confirmedPercent = unconfirmedPercent !== null ? 100 - unconfirmedPercent : null;
+  // Prefer the explicit, normalized pool balance contract. The legacy string
+  // fields are only used as a fallback for older server builds.
+  const pool = data?.poolBalance ?? null;
+  const poolAvailable = pool?.available === true;
 
-  const hasSplit = unconfirmedPercent !== null && data?.balanceConfirmed !== undefined;
+  const totalValue = poolAvailable ? pool!.total.toFixed(6) : data?.balance || '--';
+  const confirmedValue = poolAvailable
+    ? pool!.confirmed.toFixed(6)
+    : data?.balanceConfirmed || '--';
+  const unconfirmedValue = poolAvailable
+    ? pool!.unconfirmed.toFixed(6)
+    : data?.balanceUnconfirmed || '--';
+
+  // Only confirmed PRL counts toward the payout threshold.
+  const thresholdProgressPct = poolAvailable ? pool!.thresholdProgressPct : null;
+  const threshold = poolAvailable ? pool!.threshold : null;
+
+  // Share of the pool balance that is still unconfirmed (used by the split bar).
+  const unconfirmedSharePct = poolAvailable && pool!.total > 0
+    ? (pool!.unconfirmed / pool!.total) * 100
+    : Number.isFinite(data?.unconfirmedPercent)
+      ? Math.min(100, Math.max(0, data?.unconfirmedPercent ?? 0))
+      : null;
+  const confirmedSharePct = unconfirmedSharePct !== null ? 100 - unconfirmedSharePct : null;
+
+  const hasSplit = poolAvailable || (unconfirmedSharePct !== null && data?.balanceConfirmed !== undefined);
 
   return (
     <div className="space-y-6">
@@ -121,7 +139,7 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
             title="Profit 24h"
             value={data ? profit.value : '--'}
             unit={profit.unit}
-            subValue="PRL"
+            subValue={data?.profit7d ? `7d: ${data.profit7d} • 30d: ${data.profit30d ?? '--'}` : 'PRL'}
             valueClassName="text-amber-400"
             accentColor="orange"
           />
@@ -136,9 +154,11 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
             Wallet Balance
           </h2>
           <span className="text-xs text-neutral-400 font-mono">
-            {data?.payoutThreshold && data.payoutThreshold !== '0'
-              ? `Payout at ${data.payoutThreshold} ${currency}`
-              : currency}
+            {threshold !== null
+              ? `Payout at ${threshold} ${currency}`
+              : data?.payoutThreshold && data.payoutThreshold !== '0'
+                ? `Payout at ${data.payoutThreshold} ${currency}`
+                : currency}
           </span>
         </div>
 
@@ -147,7 +167,7 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
           <StatCard
             icon={<Wallet className="w-5 h-5 text-purple-400" />}
             title="Total Balance"
-            value={data?.balance || '--'}
+            value={totalValue}
             unit={currency}
             subValue={data?.balanceUsd ? `$${data.balanceUsd} USD` : undefined}
             valueClassName="text-purple-400"
@@ -158,46 +178,56 @@ const MiningStatsPanel: React.FC<MiningStatsPanelProps> = ({ data }) => {
           <StatCard
             icon={<ShieldCheck className="w-5 h-5 text-green-400" />}
             title="Confirmed"
-            value={data?.balanceConfirmed || '--'}
+            value={confirmedValue}
             unit={currency}
-            subValue={confirmedPercent !== null ? `${confirmedPercent}%` : undefined}
+            subValue={
+              thresholdProgressPct !== null
+                ? `${thresholdProgressPct.toFixed(2)}% of threshold`
+                : confirmedSharePct !== null
+                  ? `${confirmedSharePct.toFixed(2)}% of balance`
+                  : undefined
+            }
             valueClassName="text-green-400"
             accentColor="green"
-            progress={confirmedPercent ?? undefined}
+            progress={thresholdProgressPct ?? confirmedSharePct ?? undefined}
           />
 
           {/* Unconfirmed Balance */}
           <StatCard
             icon={<Hourglass className="w-5 h-5 text-orange-400" />}
-            title="Unconfirmed"
-            value={data?.balanceUnconfirmed || '--'}
+            title="Unconfirmed / Pending"
+            value={unconfirmedValue}
             unit={currency}
-            subValue={unconfirmedPercent !== null ? `${unconfirmedPercent}%` : undefined}
+            subValue={
+              unconfirmedSharePct !== null
+                ? `${unconfirmedSharePct.toFixed(2)}% of pool balance`
+                : undefined
+            }
             valueClassName="text-orange-400"
             accentColor="orange"
-            progress={unconfirmedPercent ?? undefined}
+            progress={unconfirmedSharePct ?? undefined}
           />
         </div>
 
         {/* Confirmed / Unconfirmed split bar */}
-        {hasSplit && (
+        {hasSplit && confirmedSharePct !== null && unconfirmedSharePct !== null && (
           <div className="mt-4 bg-neutral-900/60 border border-neutral-800 rounded-xl p-4">
             <div className="flex items-center justify-between text-xs font-mono mb-2">
               <span className="text-green-400">
-                Confirmed {confirmedPercent}% • {data?.balanceConfirmed} {currency}
+                Confirmed {confirmedSharePct.toFixed(2)}% • {confirmedValue} {currency}
               </span>
               <span className="text-orange-400">
-                Unconfirmed {unconfirmedPercent}% • {data?.balanceUnconfirmed} {currency}
+                Unconfirmed {unconfirmedSharePct.toFixed(2)}% • {unconfirmedValue} {currency}
               </span>
             </div>
             <div className="w-full h-2.5 rounded-full overflow-hidden bg-neutral-800 flex">
               <div
                 className="h-full bg-green-500 transition-all duration-300"
-                style={{ width: `${confirmedPercent}%` }}
+                style={{ width: `${confirmedSharePct}%` }}
               />
               <div
                 className="h-full bg-orange-500 transition-all duration-300"
-                style={{ width: `${unconfirmedPercent}%` }}
+                style={{ width: `${unconfirmedSharePct}%` }}
               />
             </div>
           </div>

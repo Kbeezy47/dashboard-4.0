@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Temporary check of the frontend normalization against real payloads.
 function toNumber(raw) {
   if (raw === undefined || raw === null) return null;

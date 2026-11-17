@@ -1,4 +1,4 @@
-// Temporary verification of the /api/wallet code path in server.ts.
+// Temporary verification of the services/get_balance.py pool split fetcher.
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
@@ -33,7 +33,7 @@ async function resolvePython(): Promise<string> {
   throw new Error('No Python interpreter found. Set PYTHON_BIN to your python executable.');
 }
 
-async function refreshWalletBalance(): Promise<string> {
+async function refreshPoolBalance(): Promise<Record<string, unknown>> {
   const bin = await resolvePython();
   const { stdout } = await execFileAsync(bin, [WALLET_SCRIPT], {
     windowsHide: true,
@@ -41,14 +41,13 @@ async function refreshWalletBalance(): Promise<string> {
     maxBuffer: 1024 * 1024,
   });
 
-  const value = parseFloat(stdout.trim());
-  if (!Number.isFinite(value)) {
+  try {
+    return JSON.parse(stdout.trim()) as Record<string, unknown>;
+  } catch {
     throw new Error(`Unexpected wallet output: ${stdout.trim() || '<empty>'}`);
   }
-
-  return value.toFixed(2);
 }
 
-const balance = await refreshWalletBalance();
+const balance = await refreshPoolBalance();
 console.log('Resolved interpreter:', resolvedPython);
-console.log('Wallet balance:', balance, 'PRL');
+console.log('Pool balance:', JSON.stringify(balance, null, 2));
