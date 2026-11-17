@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
 import os from 'os';
+import { readFile } from 'fs/promises';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createServer as createViteServer } from 'vite';
@@ -107,6 +108,14 @@ const TELEGRAM_DEBUG = process.env.TELEGRAM_DEBUG === '1';
 // percentage, so its split is kept purely as a fallback estimate.
 const POOL_BALANCE_POLL_MS = 60_000;
 const POOL_SPLIT_MAX_AGE_MS = 10 * 60_000;
+
+// Live hashrate is a single line written by the miner, e.g. "93.23 TH/s".
+// It is only shown while this exact executable is running; otherwise the
+// reading is forced to 0 so a stale file does not look like live hashrate.
+const HASHRATE_FILE = path.join(process.cwd(), 'hashrate.txt');
+const HASHRATE_POLL_MS = 5_000;
+const MINER_EXE = 'C:\\Users\\kbgam\\Documents\\Mining\\krig-miner.exe';
+const HASHRATE_OFFLINE = '0 TH/s';
 
 let telegramEstimate: TelegramBalance | null = null;
 let telegramThreshold = DEFAULT_PAYOUT_THRESHOLD;
@@ -235,6 +244,51 @@ async function refreshPoolBalance(): Promise<void> {
   applyPoolBalance();
 }
 
+// True only when the Kryptex miner process is the executable at MINER_EXE.
+async function isMinerRunning(): Promise<boolean> {
+  const command = [
+    `$p = '${MINER_EXE}'`,
+    "$hit = Get-CimInstance Win32_Process -Filter \"Name = 'krig-miner.exe'\" |",
+    "  Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $p) }",
+    "if ($hit) { 'yes' } else { 'no' }",
+  ].join('\n');
+
+  const { stdout } = await execFileAsync(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-Command', command],
+    { windowsHide: true, timeout: 8_000 },
+  );
+  const line = stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? '';
+  return line.trim().toLowerCase() === 'yes';
+}
+
+// Reads the current hashrate from hashrate.txt while the miner is running.
+// If krig-miner.exe is not running, the reading is 0. A missing or empty file
+// while the miner is up leaves the previous value in place.
+async function refreshHashrateFromFile(): Promise<void> {
+  let running = false;
+  try {
+    running = await isMinerRunning();
+  } catch (err) {
+    console.error('[hashrate] failed to check krig-miner.exe:', err);
+  }
+
+  if (!running) {
+    miningData.currentHashrate = HASHRATE_OFFLINE;
+    miningData.lastUpdated = new Date().toLocaleTimeString();
+    return;
+  }
+
+  try {
+    const raw = (await readFile(HASHRATE_FILE, 'utf8')).trim();
+    if (!raw) return;
+    miningData.currentHashrate = raw;
+    miningData.lastUpdated = new Date().toLocaleTimeString();
+  } catch (err) {
+    console.error('[hashrate] failed to read hashrate.txt:', err);
+  }
+}
+
 // Regex parsers for bot outputs.
 // Returns true when at least one field was recognised so the caller can log
 // messages that match no known format (the bot's wording changes over time).
@@ -247,7 +301,6 @@ function parseBotMessage(text: string): boolean {
     const workerMatch = text.match(/:\s*([a-zA-Z]+),\s*([\d\.]+\s*[A-Za-z\/]+)/);
     if (workerMatch) {
       miningData.workerStatus = workerMatch[1].trim();
-      miningData.currentHashrate = workerMatch[2].trim();
     }
 
     const avgMatch = text.match(/Average hashrate\s*\([^\)]+\):\s*([\d\.]+\s*[A-Za-z\/]+)/i);
@@ -312,6 +365,11 @@ let cachedSensors: Map<string, HwinfoSensor> | null = null;
 
 async function startServer() {
   // Initialize your existing Express/Bun server logic here...
+
+  // Local file, so this is ready before the network-backed wallet and pool
+  // fetches (and before Telegram, which may block on an interactive login).
+  await refreshHashrateFromFile();
+  setInterval(refreshHashrateFromFile, HASHRATE_POLL_MS);
 
   // Prime the wallet cache before the (potentially blocking) Telegram auth and
   // keep it warm on a slow timer. The wallet is read from the Pearl Explorer
